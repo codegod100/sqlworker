@@ -24,6 +24,7 @@ export interface SQLiteClient {
   insertEntry(entry: EntryInput): Promise<void>;
   fetchEntries(): Promise<EntryRecord[]>;
   deleteEntry(id: number): Promise<void>;
+  syncEntries(entries: EntryRecord[]): Promise<void>;
 }
 
 let clientPromise: Promise<SQLiteClient> | null = null;
@@ -126,6 +127,49 @@ const createClient = async ({
         });
 
         log('Deleted entry', id, deleteResponse);
+      },
+      syncEntries: async (entries: EntryRecord[]) => {
+        if (!entries.length) {
+          return;
+        }
+
+        log(`Synchronizing ${entries.length} entries from remote source.`);
+
+        try {
+          await promiser('exec', {
+            dbId,
+            sql: 'BEGIN TRANSACTION;',
+          });
+
+          for (const entry of entries) {
+            await promiser('exec', {
+              dbId,
+              sql: `INSERT INTO entries (id, title, content, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      title = excluded.title,
+                      content = excluded.content,
+                      created_at = excluded.created_at;`,
+              bind: [entry.id, entry.title, entry.content, entry.createdAt],
+            });
+          }
+
+          await promiser('exec', {
+            dbId,
+            sql: 'COMMIT;',
+          });
+
+          log('Remote entries synchronized into local database.');
+        } catch (error) {
+          await promiser('exec', {
+            dbId,
+            sql: 'ROLLBACK;',
+          }).catch(() => {
+            /* ignore rollback failure */
+          });
+
+          throw normalizeError(error);
+        }
       },
     };
   } catch (err) {

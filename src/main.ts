@@ -1,7 +1,7 @@
 import './style.css';
 
 import { initializeSQLite, type EntryRecord, type SQLiteClient } from './db';
-import { newWebSocketRpcSession } from 'capnweb';
+import { newWebSocketRpcSession, RpcTarget } from 'capnweb';
 
 const appRoot = document.querySelector<HTMLDivElement>('#app');
 
@@ -43,8 +43,9 @@ appRoot.innerHTML = `
       <div class="entries-header">
         <h2>Stored Entries</h2>
         <div class="entries-buttons">
+          <span id="remote-indicator" class="remote-indicator hidden" role="status">New remote data available</span>
+          <button id="sync-remote" type="button">Sync Remote</button>
           <button id="refresh" type="button">Refresh Local</button>
-          <button id="fetch-remote" type="button">Fetch Remote</button>
         </div>
       </div>
       <ul id="entries" aria-live="polite"></ul>
@@ -60,10 +61,19 @@ const logOutput = appRoot.querySelector<HTMLPreElement>('#log');
 const initializeButton = appRoot.querySelector<HTMLButtonElement>('#initialize');
 const entryForm = appRoot.querySelector<HTMLFormElement>('#entry-form');
 const refreshButton = appRoot.querySelector<HTMLButtonElement>('#refresh');
-const fetchRemoteButton = appRoot.querySelector<HTMLButtonElement>('#fetch-remote');
+const syncRemoteButton = appRoot.querySelector<HTMLButtonElement>('#sync-remote');
+const remoteIndicator = appRoot.querySelector<HTMLSpanElement>('#remote-indicator');
 const entriesList = appRoot.querySelector<HTMLUListElement>('#entries');
 
-if (!logOutput || !initializeButton || !entryForm || !refreshButton || !fetchRemoteButton || !entriesList) {
+if (
+  !logOutput ||
+  !initializeButton ||
+  !entryForm ||
+  !refreshButton ||
+  !syncRemoteButton ||
+  !remoteIndicator ||
+  !entriesList
+) {
   throw new Error('Failed to bootstrap UI components.');
 }
 
@@ -100,7 +110,7 @@ const setUiEnabled = (enabled: boolean) => {
     button.disabled = !enabled;
   });
   refreshButton.disabled = !enabled;
-  fetchRemoteButton.disabled = !enabled;
+  syncRemoteButton.disabled = !enabled;
   entriesList.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
     button.disabled = !enabled;
   });
@@ -118,11 +128,48 @@ const uiError = (...args: unknown[]) => {
 
 let sqliteClient: SQLiteClient | null = null;
 let workerClient: EntriesRpcSession | null = null;
+let workerUpdateTarget: ClientUpdateTarget | null = null;
+let workerUnsubscribe: RemoteUnsubscribeStub | null = null;
+
+const remoteUpdates = new Map<number, EntryRecord>();
+
+interface RemoteUpdateNotifier {
+  notifyNewData(entry: EntryRecord): Promise<void> | void;
+  dup?(): RemoteUpdateNotifier;
+}
+
+class ClientUpdateTarget extends RpcTarget implements RemoteUpdateNotifier {
+  constructor(private readonly onNotify: (entry: EntryRecord) => void) {
+    super();
+  }
+
+  async notifyNewData(entry: EntryRecord) {
+    this.onNotify(entry);
+  }
+}
+
+const updateRemoteIndicator = () => {
+  if (remoteUpdates.size === 0) {
+    remoteIndicator.classList.add('hidden');
+    remoteIndicator.textContent = 'New remote data available';
+    return;
+  }
+
+  remoteIndicator.classList.remove('hidden');
+  remoteIndicator.textContent = `New remote data available (${remoteUpdates.size})`;
+};
 
 type EntriesRpcSession = {
   sendEntry(entry: { title: string; content: string }): Promise<EntryRecord>;
   fetchEntries(): Promise<EntryRecord[]>;
   deleteEntry(params: { id: number }): Promise<{ deleted: number }>;
+  subscribeUpdates(params: {
+    listener: RemoteUpdateNotifier;
+  }): Promise<{ subscribed: boolean; unsubscribe?: RemoteUnsubscribeStub }>;
+};
+
+type RemoteUnsubscribeStub = {
+  unsubscribe(): Promise<void> | void;
 };
 
 const resolveWorkerRpcUrl = (): string => {
@@ -152,7 +199,69 @@ const createWorkerSession = (): EntriesRpcSession => {
 };
 
 const closeWorkerSession = async (): Promise<void> => {
-  workerClient = null;
+  try {
+    if (workerUnsubscribe) {
+      await workerUnsubscribe.unsubscribe();
+    }
+  } catch (error) {
+    uiError('Failed to unsubscribe from worker updates.', error);
+  } finally {
+    workerClient = null;
+    if (workerUpdateTarget) {
+      const closeFn =
+        (workerUpdateTarget as unknown as { close?: () => Promise<void> | void }).close?.bind(workerUpdateTarget) ??
+        (workerUpdateTarget as unknown as { dispose?: () => Promise<void> | void }).dispose?.bind(workerUpdateTarget);
+
+      if (closeFn) {
+        try {
+          const result = closeFn();
+          if (result && typeof (result as Promise<unknown>).then === 'function') {
+            await result;
+          }
+        } catch (releaseError) {
+          uiError('Failed to release worker update target.', releaseError);
+        }
+      }
+    }
+    workerUpdateTarget = null;
+    workerUnsubscribe = null;
+    remoteUpdates.clear();
+    updateRemoteIndicator();
+  }
+};
+
+const handleRemoteNotification = (entry: EntryRecord) => {
+  if (!entry || typeof entry !== 'object' || typeof entry.id !== 'number') {
+    uiError('Received invalid remote entry payload.', entry);
+    return;
+  }
+
+  remoteUpdates.set(entry.id, entry);
+  updateRemoteIndicator();
+  appendLog('info', 'Worker reports new entry available.', entry);
+};
+
+const syncRemoteEntries = async () => {
+  if (!sqliteClient || !workerClient) {
+    uiError('Cannot sync remote entries before initialization completes.');
+    return;
+  }
+
+  syncRemoteButton.disabled = true;
+  appendLog('info', 'Syncing remote entries into local database...');
+
+  try {
+    const remoteEntries = await workerClient.fetchEntries();
+    await sqliteClient.syncEntries(remoteEntries);
+    remoteUpdates.clear();
+    updateRemoteIndicator();
+    appendLog('info', `Synced ${remoteEntries.length} remote entries.`);
+    await renderEntries();
+  } catch (err) {
+    uiError('Failed to sync remote entries.', err);
+  } finally {
+    syncRemoteButton.disabled = false;
+  }
 };
 
 const renderEntries = async () => {
@@ -232,12 +341,17 @@ const runInitialization = async () => {
     setUiEnabled(true);
     appendLog('info', 'SQLite initialization completed.');
     await renderEntries();
+    remoteUpdates.clear();
+    updateRemoteIndicator();
 
     try {
       await closeWorkerSession();
       workerClient = createWorkerSession();
-      await workerClient.fetchEntries();
+      workerUpdateTarget = new ClientUpdateTarget(handleRemoteNotification);
+      const subscription = await workerClient.subscribeUpdates({ listener: workerUpdateTarget });
+      workerUnsubscribe = subscription?.unsubscribe ?? null;
       appendLog('info', 'Connected to Cloudflare Worker RPC.');
+      await syncRemoteEntries();
     } catch (err) {
       await closeWorkerSession();
       uiError('Failed to connect to Cloudflare Worker RPC.', err);
@@ -305,23 +419,8 @@ refreshButton.addEventListener('click', () => {
   void renderEntries();
 });
 
-fetchRemoteButton.addEventListener('click', async () => {
-  if (!workerClient) {
-    uiError('Connect to the Cloudflare Worker before fetching remote entries.');
-    return;
-  }
-
-  fetchRemoteButton.disabled = true;
-  appendLog('info', 'Fetching entries from Cloudflare Worker...');
-
-  try {
-    const remoteEntries = await workerClient.fetchEntries();
-    appendLog('info', 'Remote entries', remoteEntries);
-  } catch (err) {
-    uiError('Failed to fetch entries from Cloudflare Worker.', err);
-  } finally {
-    fetchRemoteButton.disabled = false;
-  }
+syncRemoteButton.addEventListener('click', () => {
+  void syncRemoteEntries();
 });
 
 entriesList.addEventListener('click', async (event) => {
