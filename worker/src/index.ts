@@ -5,12 +5,14 @@ export interface Env {
 }
 
 export interface EntryInput {
+  id?: string;
   title: string;
   content: string;
+  createdAt?: string;
 }
 
 export interface EntryRecord extends EntryInput {
-  id: number;
+  id: string;
   createdAt: string;
 }
 
@@ -96,7 +98,6 @@ export default {
 };
 
 const ENTRY_PREFIX = 'entry:';
-const COUNTER_KEY = 'entry.counter';
 
 export class EntriesDurableObject {
   private readonly storage: DurableObjectStorage;
@@ -114,10 +115,16 @@ export class EntriesDurableObject {
   }
 
   async insertEntry(input: EntryInput): Promise<EntryRecord> {
-    const id = await this.nextIdentifier();
-    const createdAt = new Date().toISOString();
+    const id = input.id && String(input.id).trim().length ? String(input.id).trim() : generateUlid();
+    const createdAt = input.createdAt ?? new Date().toISOString();
 
-    const record: EntryRecord = { id, createdAt, ...input };
+    const record: EntryRecord = {
+      id,
+      createdAt,
+      title: input.title,
+      content: input.content,
+    };
+
     await this.storage.put(`${ENTRY_PREFIX}${id}`, record);
     console.log('EntriesDurableObject: stored entry', record);
     await this.notifyListeners(record);
@@ -126,13 +133,20 @@ export class EntriesDurableObject {
 
   async fetchEntries(): Promise<EntryRecord[]> {
     const snapshot = await this.storage.list<EntryRecord>({ prefix: ENTRY_PREFIX });
-    const entries = Array.from(snapshot.values());
+    const entries = Array.from(snapshot.values()).map((entry) => ({
+      id: String(entry.id ?? ''),
+      title: String(entry.title ?? ''),
+      content: String(entry.content ?? ''),
+      createdAt: entry.createdAt ?? new Date().toISOString(),
+    }));
 
     return entries.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
-  async deleteEntry(id: number): Promise<void> {
-    await this.storage.delete(`${ENTRY_PREFIX}${id}`);
+  async deleteEntry(id: string): Promise<void> {
+    const key = `${ENTRY_PREFIX}${id}`;
+    await this.storage.delete(key);
+    console.log('EntriesDurableObject: deleted entry', id);
   }
 
   registerListener(listener: UpdateListener): UnsubscribeTarget {
@@ -192,13 +206,6 @@ export class EntriesDurableObject {
     console.log('EntriesDurableObject: listener unsubscribed. Total listeners:', this.updateListeners.size);
   }
 
-  private async nextIdentifier(): Promise<number> {
-    const current = (await this.storage.get<number>(COUNTER_KEY)) ?? 0;
-    const next = current + 1;
-    await this.storage.put(COUNTER_KEY, next);
-    return next;
-  }
-
   private async ensureRandomAlarm(): Promise<void> {
     const existing = await this.storage.getAlarm();
     const now = Date.now();
@@ -253,7 +260,12 @@ export class EntriesDurableObject {
     const title = `${pick(adjectives)} ${pick(nouns)}`;
     const content = `Auto-generated ${pick(topics)} at ${new Date().toLocaleTimeString()}.`;
 
-    return { title, content };
+    return {
+      id: generateUlid(),
+      title,
+      content,
+      createdAt: new Date().toISOString(),
+    };
   }
 }
 
@@ -298,10 +310,24 @@ const validateEntryInput = (params: unknown): EntryInput => {
     throw new TypeError('Entry parameters must be an object.');
   }
 
-  const title = sanitizeField((params as Record<string, unknown>).title, 'title');
-  const content = sanitizeField((params as Record<string, unknown>).content, 'content');
+  const record = params as Record<string, unknown>;
+  const title = sanitizeField(record.title, 'title');
+  const content = sanitizeField(record.content, 'content');
 
-  return { title, content };
+  const idValue = record.id ?? record.entryId;
+  const createdAtValue = record.createdAt ?? record.created_at;
+
+  const candidateId = typeof idValue === 'string' && idValue.trim() ? idValue.trim() : undefined;
+  const candidateIdFromNumber = typeof idValue === 'number' && Number.isFinite(idValue) ? String(idValue) : undefined;
+
+  const createdAt = typeof createdAtValue === 'string' && createdAtValue ? createdAtValue : undefined;
+
+  return {
+    id: candidateId ?? candidateIdFromNumber,
+    title,
+    content,
+    createdAt,
+  };
 };
 
 const sanitizeField = (value: unknown, field: string): string => {
@@ -321,30 +347,57 @@ const sanitizeField = (value: unknown, field: string): string => {
   return trimmed;
 };
 
-const normalizeEntryIdentifier = (input: unknown): number => {
+const normalizeEntryIdentifier = (input: unknown): string => {
+  if (typeof input === 'string' && input.trim()) {
+    return input.trim();
+  }
+
   if (typeof input === 'number' && Number.isFinite(input)) {
-    return input;
+    return String(input);
   }
 
   if (typeof input === 'object' && input !== null) {
     const value = (input as Record<string, unknown>).id;
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return value;
-    }
     if (typeof value === 'string' && value.trim()) {
-      const parsed = Number(value);
-      if (!Number.isNaN(parsed)) {
-        return parsed;
-      }
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
     }
   }
 
-  if (typeof input === 'string' && input.trim()) {
-    const parsed = Number(input);
-    if (!Number.isNaN(parsed)) {
-      return parsed;
-    }
-  }
+  throw new TypeError('Entry id must be provided as a non-empty string.');
+};
 
-  throw new TypeError('Entry id must be provided as a finite number.');
+const ULID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const ULID_TIMESTAMP_LENGTH = 10;
+const ULID_RANDOM_LENGTH = 16;
+
+const generateUlid = (): string => {
+  const time = Date.now();
+  const timeEncoded = encodeTime(time, ULID_TIMESTAMP_LENGTH);
+  const randomEncoded = encodeRandom(ULID_RANDOM_LENGTH);
+  return timeEncoded + randomEncoded;
+};
+
+const encodeTime = (time: number, length: number): string => {
+  let value = time;
+  const encoded = Array<string>(length);
+  for (let index = length - 1; index >= 0; index -= 1) {
+    encoded[index] = ULID_ALPHABET.charAt(value % ULID_ALPHABET.length);
+    value = Math.floor(value / ULID_ALPHABET.length);
+  }
+  return encoded.join('');
+};
+
+const encodeRandom = (length: number): string => {
+  const randomBytes = new Uint8Array(length);
+  crypto.getRandomValues(randomBytes);
+
+  const encoded = Array<string>(length);
+  randomBytes.forEach((byte, index) => {
+    encoded[index] = ULID_ALPHABET.charAt(byte % ULID_ALPHABET.length);
+  });
+
+  return encoded.join('');
 };

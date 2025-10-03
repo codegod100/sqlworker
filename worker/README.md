@@ -4,7 +4,7 @@ This directory contains a Cloudflare Worker that exposes a simple RPC endpoint, 
 
 ## Capabilities
 
-- `POST /rpc` with `{ "method": "sendEntry", "params": { "title": "...", "content": "..." } }` creates a new entry.
+- `POST /rpc` with `{ "method": "sendEntry", "params": { "id": "01H...", "title": "...", "content": "..." } }` creates or upserts an entry. If `id` is omitted, the worker generates a ULID so entries can be deduplicated across clients.
 - `POST /rpc` with `{ "method": "fetchEntries" }` returns all entries ordered by `createdAt` (descending).
 - `POST /rpc` with `{ "method": "deleteEntry", "params": { "id": 123 } }` removes an entry by identifier.
 - `POST /rpc` with `{ "method": "subscribeUpdates", "params": listener }` registers a callback capability; the worker invokes `listener.notifyNewData(entry)` whenever a new entry is created (either by clients or by the scheduled generator). The worker retains the capability by calling `.dup()` internally and will call `unsubscribe()` on the returned handle when a client disconnects.

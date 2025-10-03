@@ -1,6 +1,6 @@
 import './style.css';
 
-import { initializeSQLite, type EntryRecord, type SQLiteClient } from './db';
+import { initializeSQLite, type EntryInput, type EntryRecord, type SQLiteClient } from './db';
 import { newWebSocketRpcSession, RpcTarget } from 'capnweb';
 
 const appRoot = document.querySelector<HTMLDivElement>('#app');
@@ -130,8 +130,10 @@ let sqliteClient: SQLiteClient | null = null;
 let workerClient: EntriesRpcSession | null = null;
 let workerUpdateTarget: ClientUpdateTarget | null = null;
 let workerUnsubscribe: RemoteUnsubscribeStub | null = null;
+let workerReconnectTimer: number | null = null;
+let workerNextReconnectAt: number | null = null;
 
-const remoteUpdates = new Map<number, EntryRecord>();
+const remoteUpdates = new Map<string, EntryRecord>();
 
 interface RemoteUpdateNotifier {
   notifyNewData(entry: EntryRecord): Promise<void> | void;
@@ -145,6 +147,10 @@ class ClientUpdateTarget extends RpcTarget implements RemoteUpdateNotifier {
 
   async notifyNewData(entry: EntryRecord) {
     this.onNotify(entry);
+  }
+
+  dup(): RemoteUpdateNotifier {
+    return new ClientUpdateTarget(this.onNotify);
   }
 }
 
@@ -160,9 +166,9 @@ const updateRemoteIndicator = () => {
 };
 
 type EntriesRpcSession = {
-  sendEntry(entry: { title: string; content: string }): Promise<EntryRecord>;
+  sendEntry(entry: EntryInput): Promise<EntryRecord>;
   fetchEntries(): Promise<EntryRecord[]>;
-  deleteEntry(params: { id: number }): Promise<{ deleted: number }>;
+  deleteEntry(params: { id: string }): Promise<{ deleted: string }>;
   subscribeUpdates(params: {
     listener: RemoteUpdateNotifier;
   }): Promise<{ subscribed: boolean; unsubscribe?: RemoteUnsubscribeStub }>;
@@ -198,7 +204,7 @@ const createWorkerSession = (): EntriesRpcSession => {
   return newWebSocketRpcSession<EntriesRpcSession>(resolveWorkerRpcUrl());
 };
 
-const closeWorkerSession = async (): Promise<void> => {
+const closeWorkerSession = async ({ preserveRemoteUpdates = false }: { preserveRemoteUpdates?: boolean } = {}): Promise<void> => {
   try {
     if (workerUnsubscribe) {
       await workerUnsubscribe.unsubscribe();
@@ -225,13 +231,53 @@ const closeWorkerSession = async (): Promise<void> => {
     }
     workerUpdateTarget = null;
     workerUnsubscribe = null;
-    remoteUpdates.clear();
-    updateRemoteIndicator();
+    if (!preserveRemoteUpdates) {
+      remoteUpdates.clear();
+      updateRemoteIndicator();
+    }
+    clearWorkerReconnectTimer();
   }
 };
 
+const clearWorkerReconnectTimer = () => {
+  if (workerReconnectTimer !== null) {
+    clearTimeout(workerReconnectTimer);
+    workerReconnectTimer = null;
+  }
+  workerNextReconnectAt = null;
+};
+
+const scheduleWorkerReconnect = () => {
+  if (workerReconnectTimer !== null) {
+    return;
+  }
+
+  workerReconnectTimer = window.setTimeout(() => {
+    workerReconnectTimer = null;
+    workerNextReconnectAt = null;
+    void attemptWorkerConnection('retry');
+  }, 10_000);
+
+  workerNextReconnectAt = Date.now() + 10_000;
+  uiLog('Worker RPC unavailable; will retry connection shortly.');
+  logReconnectCountdown();
+};
+
+const logReconnectCountdown = () => {
+  if (workerNextReconnectAt === null) {
+    return;
+  }
+
+  const remaining = workerNextReconnectAt - Date.now();
+  if (remaining <= 0) {
+    return;
+  }
+
+  uiLog(`Next worker RPC attempt in ${describeRelativeMillis(remaining)}.`);
+};
+
 const handleRemoteNotification = (entry: EntryRecord) => {
-  if (!entry || typeof entry !== 'object' || typeof entry.id !== 'number') {
+  if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !entry.id.trim()) {
     uiError('Received invalid remote entry payload.', entry);
     return;
   }
@@ -242,9 +288,19 @@ const handleRemoteNotification = (entry: EntryRecord) => {
 };
 
 const syncRemoteEntries = async () => {
-  if (!sqliteClient || !workerClient) {
+  if (!sqliteClient) {
     uiError('Cannot sync remote entries before initialization completes.');
     return;
+  }
+
+  if (!workerClient) {
+    appendLog('info', 'Worker RPC not connected; attempting to reconnect before syncing.');
+    await attemptWorkerConnection('retry');
+
+    if (!workerClient) {
+      appendLog('info', 'Skipping remote sync; worker RPC still unavailable.');
+      return;
+    }
   }
 
   syncRemoteButton.disabled = true;
@@ -262,6 +318,76 @@ const syncRemoteEntries = async () => {
   } finally {
     syncRemoteButton.disabled = false;
   }
+};
+
+const describeErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+};
+
+const attemptWorkerConnection = async (phase: 'initial' | 'retry'): Promise<void> => {
+  if (workerClient) {
+    return;
+  }
+
+  try {
+    let session: EntriesRpcSession;
+
+    try {
+      session = createWorkerSession();
+    } catch (creationError) {
+      uiLog(`Cloudflare Worker RPC unavailable (${describeErrorMessage(creationError)}).`);
+      scheduleWorkerReconnect();
+      return;
+    }
+
+    workerClient = session;
+    workerUpdateTarget = new ClientUpdateTarget(handleRemoteNotification);
+
+    const subscription = await workerClient.subscribeUpdates({ listener: workerUpdateTarget });
+    workerUnsubscribe = subscription?.unsubscribe ?? null;
+
+    clearWorkerReconnectTimer();
+    uiLog(phase === 'retry' ? 'Reconnected to Cloudflare Worker RPC.' : 'Connected to Cloudflare Worker RPC.');
+
+    await syncRemoteEntries();
+  } catch (err) {
+    await closeWorkerSession({ preserveRemoteUpdates: true });
+    uiLog(`Cloudflare Worker RPC unavailable (${describeErrorMessage(err)}).`);
+    scheduleWorkerReconnect();
+  }
+};
+
+const describeRelativeMillis = (milliseconds: number): string => {
+  if (milliseconds < 1000) {
+    return `${Math.max(1, Math.round(milliseconds))}ms`;
+  }
+
+  const seconds = Math.round(milliseconds / 1000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) {
+    return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 };
 
 const renderEntries = async () => {
@@ -283,12 +409,20 @@ const renderEntries = async () => {
 
     const fragment = document.createDocumentFragment();
 
-    entries.forEach((entry) => {
+    const limitedEntries = entries.slice(0, 15);
+    limitedEntries.forEach((entry) => {
       fragment.appendChild(renderEntry(entry));
     });
 
     entriesList.innerHTML = '';
     entriesList.append(fragment);
+
+    if (entries.length > limitedEntries.length) {
+      const footnote = document.createElement('li');
+      footnote.className = 'entries-footnote';
+      footnote.textContent = `Showing latest ${limitedEntries.length} of ${entries.length} entries.`;
+      entriesList.append(footnote);
+    }
   } catch (err) {
     entriesList.innerHTML = '<li class="empty">Failed to fetch entries.</li>';
     uiError('Fetching entries failed.', err);
@@ -344,18 +478,7 @@ const runInitialization = async () => {
     remoteUpdates.clear();
     updateRemoteIndicator();
 
-    try {
-      await closeWorkerSession();
-      workerClient = createWorkerSession();
-      workerUpdateTarget = new ClientUpdateTarget(handleRemoteNotification);
-      const subscription = await workerClient.subscribeUpdates({ listener: workerUpdateTarget });
-      workerUnsubscribe = subscription?.unsubscribe ?? null;
-      appendLog('info', 'Connected to Cloudflare Worker RPC.');
-      await syncRemoteEntries();
-    } catch (err) {
-      await closeWorkerSession();
-      uiError('Failed to connect to Cloudflare Worker RPC.', err);
-    }
+    await attemptWorkerConnection('initial');
   } catch (err) {
     uiError('Initialization failed.', err);
   } finally {
@@ -389,13 +512,13 @@ entryForm.addEventListener('submit', async (event) => {
   });
 
   try {
-    await sqliteClient.insertEntry({ title, content });
+    const record = await sqliteClient.insertEntry({ title, content });
     appendLog('info', `Stored entry "${title}".`);
     entryForm.reset();
     if (workerClient) {
       try {
-        await workerClient.sendEntry({ title, content });
-        appendLog('info', `Synced entry "${title}" to worker.`);
+        await workerClient.sendEntry(record);
+        appendLog('info', `Synced entry "${title}" (${record.id}) to worker.`);
       } catch (err) {
         uiError(`Failed to sync entry "${title}" to worker.`, err);
       }
@@ -439,29 +562,31 @@ entriesList.addEventListener('click', async (event) => {
     return;
   }
 
-  const id = Number(actionButton.dataset.entryId);
-  if (!Number.isFinite(id)) {
+  const id = actionButton.dataset.entryId;
+  if (!id) {
     uiError('Invalid entry identifier supplied for deletion.');
     return;
   }
 
   actionButton.disabled = true;
-  appendLog('info', `Deleting entry #${id}...`);
+  appendLog('info', `Deleting entry ${id}...`);
 
   try {
     await sqliteClient.deleteEntry(id);
-    appendLog('info', `Deleted entry #${id}.`);
+    appendLog('info', `Deleted entry ${id}.`);
+    remoteUpdates.delete(id);
+    updateRemoteIndicator();
     if (workerClient) {
       try {
         await workerClient.deleteEntry({ id });
-        appendLog('info', `Synced deletion for entry #${id} to worker.`);
+        appendLog('info', `Synced deletion for entry ${id} to worker.`);
       } catch (err) {
-        uiError(`Failed to sync deletion for entry #${id}.`, err);
+        uiError(`Failed to sync deletion for entry ${id}.`, err);
       }
     }
     await renderEntries();
   } catch (err) {
-    uiError(`Failed to delete entry #${id}.`, err);
+    uiError(`Failed to delete entry ${id}.`, err);
   }
 });
 

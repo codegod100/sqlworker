@@ -131,6 +131,9 @@ textarea:focus {
   padding: 0;
   display: grid;
   gap: 12px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 
 .entry-row {
@@ -156,6 +159,16 @@ textarea:focus {
 .entry-row time {
   font-size: 0.85rem;
   color: rgba(148, 163, 184, 0.85);
+}
+
+.entries-footnote {
+  margin-top: 4px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.15);
+  color: rgba(226, 232, 240, 0.9);
+  font-size: 0.9rem;
+  text-align: center;
 }
 
 .entry-actions {

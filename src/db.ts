@@ -11,19 +11,21 @@ export interface SQLiteInitOptions {
 }
 
 export interface EntryInput {
+  id?: string;
   title: string;
   content: string;
+  createdAt?: string;
 }
 
 export interface EntryRecord extends EntryInput {
-  id: number;
+  id: string;
   createdAt: string;
 }
 
 export interface SQLiteClient {
-  insertEntry(entry: EntryInput): Promise<void>;
+  insertEntry(entry: EntryInput): Promise<EntryRecord>;
   fetchEntries(): Promise<EntryRecord[]>;
-  deleteEntry(id: number): Promise<void>;
+  deleteEntry(id: string): Promise<void>;
   syncEntries(entries: EntryRecord[]): Promise<void>;
 }
 
@@ -70,25 +72,26 @@ const createClient = async ({
       log('OPFS is available, database stored at', persistentPath);
     }
 
-    log('Ensuring local schema...');
-    await promiser('exec', {
-      dbId,
-      sql: `CREATE TABLE IF NOT EXISTS entries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );`,
-    });
-    log('Schema ready.');
+    await ensureSchema(promiser, dbId, log);
 
-    const insertEntry = async ({ title, content }: EntryInput) => {
+    const insertEntry = async ({ id, title, content, createdAt }: EntryInput): Promise<EntryRecord> => {
+      const finalId = id ?? generateUlid();
+      const finalCreatedAt = createdAt ?? new Date().toISOString();
+
       const insertResponse = await promiser('exec', {
         dbId,
-        sql: 'INSERT INTO entries (title, content) VALUES (?, ?);',
-        bind: [title, content],
+        sql: `INSERT INTO entries (id, title, content, created_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 title = excluded.title,
+                 content = excluded.content,
+                 created_at = excluded.created_at;`,
+        bind: [finalId, title, content, finalCreatedAt],
       });
-      log('Inserted entry', title, insertResponse);
+
+      log('Stored entry', finalId, insertResponse);
+
+      return { id: finalId, title, content, createdAt: finalCreatedAt };
     };
 
     const fetchEntries = async (): Promise<EntryRecord[]> => {
@@ -104,20 +107,22 @@ const createClient = async ({
       const rows = normalizeRows(response);
       log(`Fetched ${rows.length} entries from the database.`);
 
-      return rows.map((row) => ({
-        id: Number(row.id ?? 0),
-        title: String(row.title ?? ''),
-        content: String(row.content ?? ''),
-        createdAt: String(row.created_at ?? row.createdAt ?? ''),
-      }));
+      return rows
+        .map((row) => ({
+          id: String(row.id ?? ''),
+          title: String(row.title ?? ''),
+          content: String(row.content ?? ''),
+          createdAt: String(row.created_at ?? row.createdAt ?? ''),
+        }))
+        .filter((entry) => entry.id.length > 0);
     };
 
     return {
       insertEntry,
       fetchEntries,
-      deleteEntry: async (id: number) => {
-        if (!Number.isFinite(id)) {
-          throw new Error('Entry id must be a finite number.');
+      deleteEntry: async (id: string) => {
+        if (!id) {
+          throw new Error('Entry id must be provided.');
         }
 
         const deleteResponse = await promiser('exec', {
@@ -142,6 +147,9 @@ const createClient = async ({
           });
 
           for (const entry of entries) {
+            if (!entry.id) {
+              continue;
+            }
             await promiser('exec', {
               dbId,
               sql: `INSERT INTO entries (id, title, content, created_at)
@@ -229,6 +237,123 @@ const normalizeError = (value: unknown): Error => {
     'Unknown SQLite error';
 
   return new Error(message);
+};
+
+const ensureSchema = async (promiser: SQLitePromiser, dbId: DatabaseIdentifier, log: Logger) => {
+  const existingColumnsResponse = await promiser('exec', {
+    dbId,
+    sql: `PRAGMA table_info('entries');`,
+    rowMode: 'object',
+    returnValue: 'resultRows',
+  });
+
+  const columns = normalizeRows(existingColumnsResponse);
+
+  if (!columns.length) {
+    await createEntriesTable(promiser, dbId, log);
+    return;
+  }
+
+  const idColumn = columns.find((column) => String(column.name) === 'id');
+  const idType = String(idColumn?.type ?? '').toUpperCase();
+
+  if (idType === 'TEXT') {
+    log('Schema ready.');
+    return;
+  }
+
+  log('Migrating entries table to ULID-based schema...');
+
+  await promiser('exec', { dbId, sql: 'BEGIN TRANSACTION;' });
+  try {
+    await promiser('exec', { dbId, sql: 'ALTER TABLE entries RENAME TO entries_legacy;' });
+    await createEntriesTable(promiser, dbId, log);
+
+    const legacyRowsResponse = await promiser('exec', {
+      dbId,
+      sql: `SELECT id, title, content, created_at FROM entries_legacy ORDER BY created_at ASC;`,
+      rowMode: 'object',
+      returnValue: 'resultRows',
+    });
+
+    const legacyRows = normalizeRows(legacyRowsResponse);
+
+    for (const row of legacyRows) {
+      const rawId = row.id;
+      const migratedId = typeof rawId === 'string' && rawId.trim().length
+        ? rawId.trim()
+        : typeof rawId === 'number' && Number.isFinite(rawId)
+        ? String(rawId)
+        : generateUlid();
+      await promiser('exec', {
+        dbId,
+        sql: `INSERT INTO entries (id, title, content, created_at)
+               VALUES (?, ?, ?, ?);`,
+        bind: [migratedId, String(row.title ?? ''), String(row.content ?? ''), String(row.created_at ?? row.createdAt ?? new Date().toISOString())],
+      });
+    }
+
+    await promiser('exec', { dbId, sql: 'DROP TABLE entries_legacy;' });
+    await promiser('exec', { dbId, sql: 'COMMIT;' });
+    log('Schema migration complete.');
+  } catch (migrationError) {
+    await promiser('exec', { dbId, sql: 'ROLLBACK;' }).catch(() => {});
+    throw migrationError;
+  }
+};
+
+const createEntriesTable = async (promiser: SQLitePromiser, dbId: DatabaseIdentifier, log: Logger) => {
+  await promiser('exec', {
+    dbId,
+    sql: `CREATE TABLE IF NOT EXISTS entries (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );`,
+  });
+  log('Entries table ready.');
+};
+
+const ULID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const ULID_TIMESTAMP_LENGTH = 10;
+const ULID_RANDOM_LENGTH = 16;
+
+const generateUlid = (): string => {
+  const time = Date.now();
+  const timeEncoded = encodeTime(time, ULID_TIMESTAMP_LENGTH);
+  const randomEncoded = encodeRandom(ULID_RANDOM_LENGTH);
+  return timeEncoded + randomEncoded;
+};
+
+const encodeTime = (time: number, length: number): string => {
+  let value = time;
+  const encoded = Array<string>(length);
+  for (let i = length - 1; i >= 0; i -= 1) {
+    encoded[i] = ULID_ALPHABET.charAt(value % ULID_ALPHABET.length);
+    value = Math.floor(value / ULID_ALPHABET.length);
+  }
+  return encoded.join('');
+};
+
+const encodeRandom = (length: number): string => {
+  const randomBytes = new Uint8Array(length);
+  getCrypto().getRandomValues(randomBytes);
+
+  const encoded = Array<string>(length);
+  randomBytes.forEach((byte, index) => {
+    encoded[index] = ULID_ALPHABET.charAt(byte % ULID_ALPHABET.length);
+  });
+
+  return encoded.join('');
+};
+
+const getCrypto = (): Crypto => {
+  if (typeof globalThis === 'object' && globalThis.crypto && 'getRandomValues' in globalThis.crypto) {
+    return globalThis.crypto;
+  }
+
+  throw new Error('Secure random number generation is not supported in this environment.');
 };
 
 const extractDbId = (payload: unknown): DatabaseIdentifier | undefined => {
