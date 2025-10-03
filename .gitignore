@@ -1,0 +1,15 @@
+# Root artifacts
+dist/
+node_modules/
+.pnpm-store/
+
+# Logs & temp
+*.log
+*.tmp
+.DS_Store
+
+# Worker workspace artifacts
+worker/node_modules/
+worker/.pnpm-store/
+worker/dist/
+worker/.wrangler/

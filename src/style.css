@@ -1,0 +1,230 @@
+:root {
+  color-scheme: light dark;
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  background: radial-gradient(circle at top, rgba(99, 102, 241, 0.15), transparent),
+    radial-gradient(circle at bottom, rgba(244, 114, 182, 0.12), transparent);
+}
+
+.container {
+  width: min(720px, 100%);
+  margin: 48px 16px;
+  padding: 32px;
+  border-radius: 24px;
+  background-color: rgb(26 26 35 / 75%);
+  backdrop-filter: blur(16px);
+  color: #f8fafc;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.25);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.container header {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.container h1 {
+  margin: 0;
+  font-size: clamp(1.75rem, 5vw, 2.5rem);
+}
+
+.container p {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.9);
+}
+
+.controls {
+  margin-bottom: 20px;
+}
+
+.entry-section,
+.entries-section {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+#entry-form {
+  display: grid;
+  gap: 16px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: rgba(226, 232, 240, 0.85);
+}
+
+input,
+textarea {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: rgba(15, 23, 42, 0.5);
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: rgba(129, 140, 248, 0.7);
+  box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.35);
+}
+
+.entries-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.entries-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.entries-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+#entries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.entry-row {
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  display: grid;
+  gap: 8px;
+}
+
+.entry-row h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.entry-row p {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.9);
+  white-space: pre-wrap;
+}
+
+.entry-row time {
+  font-size: 0.85rem;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.entry-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.entry-actions button {
+  padding: 10px 16px;
+  font-size: 0.95rem;
+}
+
+.danger {
+  background: linear-gradient(135deg, #ef4444, #f97316);
+}
+
+.danger:hover:not(:disabled) {
+  box-shadow: 0 20px 35px rgba(239, 68, 68, 0.35);
+}
+
+.danger:active:not(:disabled) {
+  box-shadow: 0 12px 20px rgba(239, 68, 68, 0.35);
+}
+
+.placeholder,
+.empty {
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px dashed rgba(148, 163, 184, 0.4);
+  background: rgba(15, 23, 42, 0.35);
+  text-align: center;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+button {
+  appearance: none;
+  border: none;
+  border-radius: 12px;
+  padding: 12px 20px;
+  font-size: 1rem;
+  font-weight: 600;
+  background: linear-gradient(135deg, #4f46ef, #9333ea);
+  color: white;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 20px 35px rgba(79, 70, 229, 0.35);
+  filter: brightness(1.05);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 12px 20px rgba(79, 70, 229, 0.35);
+}
+
+button:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.log-section {
+  display: grid;
+  gap: 12px;
+}
+
+.log-section h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+#log {
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 0.95rem;
+  color: rgba(226, 232, 240, 0.95);
+}

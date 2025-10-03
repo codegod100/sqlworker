@@ -1,0 +1,12 @@
+name = "sqlworker-worker"
+main = "src/index.ts"
+compatibility_date = "2024-11-12"
+
+[durable_objects]
+bindings = [
+  { name = "ENTRIES", class_name = "EntriesDurableObject" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["EntriesDurableObject"]
