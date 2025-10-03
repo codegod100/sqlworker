@@ -50,6 +50,18 @@ body {
   margin-bottom: 20px;
 }
 
+.inline-field {
+  margin-left: 16px;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 260px;
+}
+
+.inline-field input {
+  width: 100%;
+}
+
 .entry-section,
 .entries-section {
   display: grid;

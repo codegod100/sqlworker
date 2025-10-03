@@ -19,6 +19,10 @@ appRoot.innerHTML = `
     </header>
     <section class="controls">
       <button id="initialize" type="button">Reinitialize Worker</button>
+      <label class="field inline-field">
+        <span>Worker WebSocket URL</span>
+        <input id="worker-url" type="text" placeholder="ws://localhost:8787/rpc" />
+      </label>
     </section>
     <section class="entry-section">
       <h2>Add Entry</h2>
@@ -64,6 +68,7 @@ const refreshButton = appRoot.querySelector<HTMLButtonElement>('#refresh');
 const syncRemoteButton = appRoot.querySelector<HTMLButtonElement>('#sync-remote');
 const remoteIndicator = appRoot.querySelector<HTMLSpanElement>('#remote-indicator');
 const entriesList = appRoot.querySelector<HTMLUListElement>('#entries');
+const workerUrlInput = appRoot.querySelector<HTMLInputElement>('#worker-url');
 
 if (
   !logOutput ||
@@ -72,7 +77,8 @@ if (
   !refreshButton ||
   !syncRemoteButton ||
   !remoteIndicator ||
-  !entriesList
+  !entriesList ||
+  !workerUrlInput
 ) {
   throw new Error('Failed to bootstrap UI components.');
 }
@@ -132,6 +138,7 @@ let workerUpdateTarget: ClientUpdateTarget | null = null;
 let workerUnsubscribe: RemoteUnsubscribeStub | null = null;
 let workerReconnectTimer: number | null = null;
 let workerNextReconnectAt: number | null = null;
+let customWorkerUrl: string | null = null;
 
 const remoteUpdates = new Map<string, EntryRecord>();
 
@@ -179,6 +186,11 @@ type RemoteUnsubscribeStub = {
 };
 
 const resolveWorkerRpcUrl = (): string => {
+  const userPreference = customWorkerUrl ?? workerUrlInput.value.trim();
+  if (userPreference) {
+    return userPreference;
+  }
+
   const explicit = import.meta.env.VITE_WORKER_WS_URL;
   if (explicit) {
     return explicit;
@@ -471,6 +483,12 @@ const runInitialization = async () => {
   setUiEnabled(false);
 
   try {
+    const storedUrl = window.localStorage.getItem('worker.ws.url');
+    if (storedUrl) {
+      customWorkerUrl = storedUrl;
+      workerUrlInput.value = storedUrl;
+    }
+
     sqliteClient = await initializeSQLite({ log: uiLog, error: uiError });
     setUiEnabled(true);
     appendLog('info', 'SQLite initialization completed.');
@@ -488,6 +506,22 @@ const runInitialization = async () => {
 
 initializeButton.addEventListener('click', () => {
   void runInitialization();
+});
+
+workerUrlInput.addEventListener('change', () => {
+  const value = workerUrlInput.value.trim();
+  customWorkerUrl = value || null;
+  if (customWorkerUrl) {
+    window.localStorage.setItem('worker.ws.url', customWorkerUrl);
+    uiLog(`Saved worker WebSocket URL: ${customWorkerUrl}`);
+  } else {
+    window.localStorage.removeItem('worker.ws.url');
+    uiLog('Cleared custom worker WebSocket URL.');
+  }
+
+  closeWorkerSession({ preserveRemoteUpdates: true }).finally(() => {
+    void attemptWorkerConnection('retry');
+  });
 });
 
 entryForm.addEventListener('submit', async (event) => {
